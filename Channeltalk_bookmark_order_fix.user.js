@@ -2,6 +2,7 @@
 // @name         ChannelTalk Bookmark Order Fix
 // @namespace    http://channel.io/
 // @version      1.0
+// @description  채널톡 즐겨찾기 순서 바꾸는 스크립트
 // @author       윤도우리
 // @match        https://desk.channel.io/*
 // @grant        none
