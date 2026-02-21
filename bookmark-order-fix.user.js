@@ -136,6 +136,9 @@
             log('📦 캡처 완료:', bookmarkSet.size, '건');
             isBookmarkPage = true;
             scheduleOverlay();
+
+            // 전체 페이지 로드 트리거 (초기 25건 이후 나머지)
+            setTimeout(refreshBookmarkData, 1000);
         }
 
         // 개별 채팅 업데이트도 캡처 (실시간 반영)
@@ -466,95 +469,145 @@
     });
 
     // ============================================================
-    // 백그라운드 자동 갱신: bookmark API 직접 호출
+    // 백그라운드 자동 갱신: bookmark API 페이지네이션 전체 로드
     // ============================================================
     const rtDesc = Object.getOwnPropertyDescriptor(XMLHttpRequest.prototype, 'responseText');
 
-    function refreshBookmarkData() {
-        if (!channelId || !isBookmarkPage) return;
-
-        const url = `https://desk-api.channel.io/desk/channels/${channelId}/user-chats/bookmark?limit=25`;
-        const xhr = new XMLHttpRequest();
-        xhr._bsInternal = true;
-        nativeOpen.call(xhr, 'GET', url, true);
-        xhr.withCredentials = true;
-
-        xhr.onload = function() {
-            try {
-                const data = _origParse(rtDesc.get.call(xhr));
-                if (!data?.userChats?.length || !data?.bookmarks?.length) return;
-
-                let changed = false;
-
-                // bookmarkSet 갱신
-                const newSet = new Set();
-                data.bookmarks.forEach(bm => { if (bm.chatId) newSet.add(bm.chatId); });
-                if (newSet.size !== bookmarkSet.size || [...newSet].some(id => !bookmarkSet.has(id))) {
-                    bookmarkSet.clear();
-                    newSet.forEach(id => bookmarkSet.add(id));
-                    changed = true;
+    function fetchPage(cursor) {
+        return new Promise((resolve, reject) => {
+            const base = `https://desk-api.channel.io/desk/channels/${channelId}/user-chats/bookmark?limit=100`;
+            const url = cursor ? `${base}&next=${encodeURIComponent(cursor)}` : base;
+            const xhr = new XMLHttpRequest();
+            xhr._bsInternal = true;
+            nativeOpen.call(xhr, 'GET', url, true);
+            xhr.withCredentials = true;
+            xhr.onload = () => {
+                try {
+                    const text = rtDesc.get.call(xhr);
+                    if (!text) { reject(new Error('빈 응답')); return; }
+                    resolve(_origParse(text));
+                } catch (e) {
+                    log('❌ fetchPage 파싱 오류:', e, 'status:', xhr.status);
+                    reject(e);
                 }
-
-                // userChats 갱신
-                data.userChats.forEach(chat => {
-                    const existing = chatMap.get(chat.id);
-                    const newFront = chat.frontUpdatedAt || 0;
-                    if (!existing) {
-                        chatMap.set(chat.id, {
-                            id: chat.id,
-                            name: chat.name || '',
-                            frontUpdatedAt: newFront,
-                            state: chat.state || '',
-                            assigneeId: chat.assigneeId || '',
-                            userId: chat.userId || '',
-                        });
-                        changed = true;
-                    } else {
-                        if (existing.frontUpdatedAt !== newFront) { existing.frontUpdatedAt = newFront; changed = true; }
-                        if (chat.state && existing.state !== chat.state) { existing.state = chat.state; changed = true; }
-                        if (chat.name && existing.name !== chat.name) { existing.name = chat.name; changed = true; }
-                        if (chat.assigneeId && existing.assigneeId !== chat.assigneeId) { existing.assigneeId = chat.assigneeId; changed = true; }
-                    }
-                });
-
-                // messages 갱신
-                if (Array.isArray(data.messages)) {
-                    data.messages.forEach(msg => {
-                        if (!msg.chatId) return;
-                        const existing = messageMap.get(msg.chatId);
-                        const createdAt = msg.createdAt || 0;
-                        if (!existing || createdAt > existing.createdAt) {
-                            messageMap.set(msg.chatId, {
-                                text: msg.plainText || msg.message || '',
-                                createdAt,
-                                personType: msg.personType || '',
-                            });
-                            changed = true;
-                        }
-                    });
-                }
-
-                // managers 갱신
-                if (Array.isArray(data.managers)) {
-                    data.managers.forEach(m => {
-                        managerMap.set(m.id, { name: m.name || '', avatarUrl: m.avatarUrl || '' });
-                    });
-                }
-
-                if (changed && overlayEl) {
-                    log('🔄 자동 갱신 반영');
-                    updateOverlayData();
-                }
-            } catch (e) {
-                // 무시
-            }
-        };
-
-        nativeSend.call(xhr);
+            };
+            xhr.onerror = () => {
+                log('❌ fetchPage 네트워크 오류, status:', xhr.status);
+                reject(new Error('XHR failed'));
+            };
+            nativeSend.call(xhr);
+        });
     }
 
-    // 10초마다 백그라운드 갱신
-    setInterval(refreshBookmarkData, 10000);
+    let isRefreshing = false;
+
+    async function refreshBookmarkData() {
+        if (!channelId || !isBookmarkPage || isRefreshing) return;
+        isRefreshing = true;
+        log('🔄 갱신 시작...');
+
+        try {
+            const allChats = new Map();
+            const allBookmarks = new Map();
+            const allMessages = new Map();
+            let allManagers = [];
+            let nextCursor = null;
+            let prevCursor = null;
+            let page = 0;
+
+            do {
+                page++;
+                const data = await fetchPage(nextCursor);
+                if (!data?.userChats?.length) { log('⚠️ 페이지', page, '빈 응답'); break; }
+
+                log(`  API 응답: chats=${data.userChats.length} bms=${data.bookmarks?.length || 0}`);
+
+                let newCount = 0;
+                data.userChats.forEach(c => { if (!allChats.has(c.id)) { allChats.set(c.id, c); newCount++; } });
+                (data.bookmarks || []).forEach(bm => { if (bm.chatId && !allBookmarks.has(bm.chatId)) allBookmarks.set(bm.chatId, bm); });
+                (data.messages || []).forEach(msg => {
+                    const key = msg.chatId;
+                    if (key) {
+                        const existing = allMessages.get(key);
+                        if (!existing || (msg.createdAt || 0) > existing.createdAt) allMessages.set(key, msg);
+                    }
+                });
+                if (data.managers) allManagers = allManagers.concat(data.managers);
+
+                log(`  페이지 ${page}: +${newCount}건 (총 ${allChats.size}건) next=${data.next ? data.next.substring(0, 30) + '...' : 'N'}`);
+
+                prevCursor = nextCursor;
+                nextCursor = data.next || null;
+
+                if (nextCursor && nextCursor === prevCursor) { log('⚠️ 커서 반복 → 종료'); break; }
+                if (newCount === 0 && page > 1) { log('⚠️ 새 항목 없음 → 종료, 커서:', nextCursor?.substring(0, 30)); break; }
+            } while (nextCursor && page < 20);
+
+            // 데이터 반영
+            let changed = false;
+
+            // bookmarkSet 갱신
+            const newSet = new Set(allBookmarks.keys());
+            if (newSet.size !== bookmarkSet.size || [...newSet].some(id => !bookmarkSet.has(id))) {
+                bookmarkSet.clear();
+                newSet.forEach(id => bookmarkSet.add(id));
+                changed = true;
+            }
+
+            // userChats 갱신
+            allChats.forEach((chat, id) => {
+                const existing = chatMap.get(id);
+                const newFront = chat.frontUpdatedAt || 0;
+                if (!existing) {
+                    chatMap.set(id, {
+                        id: chat.id,
+                        name: chat.name || '',
+                        frontUpdatedAt: newFront,
+                        state: chat.state || '',
+                        assigneeId: chat.assigneeId || '',
+                        userId: chat.userId || '',
+                    });
+                    changed = true;
+                } else {
+                    if (existing.frontUpdatedAt !== newFront) { existing.frontUpdatedAt = newFront; changed = true; }
+                    if (chat.state && existing.state !== chat.state) { existing.state = chat.state; changed = true; }
+                    if (chat.name && existing.name !== chat.name) { existing.name = chat.name; changed = true; }
+                    if (chat.assigneeId && existing.assigneeId !== chat.assigneeId) { existing.assigneeId = chat.assigneeId; changed = true; }
+                }
+            });
+
+            // messages 갱신
+            allMessages.forEach((msg, chatId) => {
+                const existing = messageMap.get(chatId);
+                const createdAt = msg.createdAt || 0;
+                if (!existing || createdAt > existing.createdAt) {
+                    messageMap.set(chatId, {
+                        text: msg.plainText || msg.message || '',
+                        createdAt,
+                        personType: msg.personType || '',
+                    });
+                    changed = true;
+                }
+            });
+
+            // managers 갱신
+            allManagers.forEach(m => {
+                managerMap.set(m.id, { name: m.name || '', avatarUrl: m.avatarUrl || '' });
+            });
+
+            if (changed && overlayEl) {
+                log(`🔄 자동 갱신 반영 (${allChats.size}건, ${page}페이지)`);
+                updateOverlayData();
+            }
+        } catch (e) {
+            log('❌ 갱신 오류:', e);
+        } finally {
+            isRefreshing = false;
+        }
+    }
+
+    // 3초마다 전체 갱신
+    setInterval(refreshBookmarkData, 3000);
 
     log('✅ v12 로드 완료 (오버레이 방식)');
 })();
