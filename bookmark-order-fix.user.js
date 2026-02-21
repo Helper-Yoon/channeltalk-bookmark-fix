@@ -475,7 +475,7 @@
 
     function fetchPage(cursor) {
         return new Promise((resolve, reject) => {
-            const base = `https://desk-api.channel.io/desk/channels/${channelId}/user-chats/bookmark?limit=100`;
+            const base = `https://desk-api.channel.io/desk/channels/${channelId}/user-chats/bookmark?limit=500`;
             const url = cursor ? `${base}&next=${encodeURIComponent(cursor)}` : base;
             const xhr = new XMLHttpRequest();
             xhr._bsInternal = true;
