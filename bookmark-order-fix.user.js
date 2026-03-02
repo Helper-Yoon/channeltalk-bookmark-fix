@@ -16,7 +16,7 @@
         SORT_FIELD: 'frontUpdatedAt',
         DESC: true,
         ROW_HEIGHT: 72,
-        DEBUG: true,
+        DEBUG: false,
     };
 
     const log = (...args) => CONFIG.DEBUG && console.log('[BS12]', ...args);
@@ -545,6 +545,7 @@
 
             // 데이터 반영
             let changed = false;
+            let changeLog = [];
 
             // bookmarkSet 갱신
             const newSet = new Set(allBookmarks.keys());
@@ -552,6 +553,7 @@
                 bookmarkSet.clear();
                 newSet.forEach(id => bookmarkSet.add(id));
                 changed = true;
+                changeLog.push(`북마크 수: ${newSet.size}`);
             }
 
             // userChats 갱신
@@ -568,11 +570,16 @@
                         userId: chat.userId || '',
                     });
                     changed = true;
+                    changeLog.push(`새 채팅: ${chat.name}`);
                 } else {
-                    if (existing.frontUpdatedAt !== newFront) { existing.frontUpdatedAt = newFront; changed = true; }
-                    if (chat.state && existing.state !== chat.state) { existing.state = chat.state; changed = true; }
+                    if (existing.frontUpdatedAt !== newFront) {
+                        changeLog.push(`시간변경: ${chat.name} ${new Date(existing.frontUpdatedAt).toLocaleTimeString('ko-KR')} → ${new Date(newFront).toLocaleTimeString('ko-KR')}`);
+                        existing.frontUpdatedAt = newFront;
+                        changed = true;
+                    }
+                    if (chat.state && existing.state !== chat.state) { existing.state = chat.state; changed = true; changeLog.push(`상태변경: ${chat.name}`); }
                     if (chat.name && existing.name !== chat.name) { existing.name = chat.name; changed = true; }
-                    if (chat.assigneeId && existing.assigneeId !== chat.assigneeId) { existing.assigneeId = chat.assigneeId; changed = true; }
+                    if (chat.assigneeId && existing.assigneeId !== chat.assigneeId) { existing.assigneeId = chat.assigneeId; changed = true; changeLog.push(`담당변경: ${chat.name}`); }
                 }
             });
 
@@ -581,6 +588,8 @@
                 const existing = messageMap.get(chatId);
                 const createdAt = msg.createdAt || 0;
                 if (!existing || createdAt > existing.createdAt) {
+                    const chatName = chatMap.get(chatId)?.name || chatId;
+                    changeLog.push(`메시지변경: ${chatName}`);
                     messageMap.set(chatId, {
                         text: msg.plainText || msg.message || '',
                         createdAt,
@@ -597,7 +606,10 @@
 
             if (changed && overlayEl) {
                 log(`🔄 자동 갱신 반영 (${allChats.size}건, ${page}페이지)`);
+                changeLog.forEach(c => log(`  ✏️ ${c}`));
                 updateOverlayData();
+            } else if (!changed) {
+                log('⏸️ 변경 없음');
             }
         } catch (e) {
             log('❌ 갱신 오류:', e);
